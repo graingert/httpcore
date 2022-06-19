@@ -2,6 +2,7 @@ import enum
 import time
 from types import TracebackType
 from typing import (
+    TYPE_CHECKING,
     Iterable,
     Iterator,
     List,
@@ -25,6 +26,27 @@ from .._synchronization import Lock
 from .._trace import Trace
 from ..backends.base import NetworkStream
 from .interfaces import ConnectionInterface
+
+if TYPE_CHECKING:
+    from typing_extensions import Literal, Protocol, TypeAlias
+
+    class _Sentinel(enum.Enum):
+        PAUSED = enum.auto()
+        NEED_DATA = enum.auto()
+
+    _PausedType: TypeAlias = Literal[_Sentinel.PAUSED]
+    _NeedDataType: TypeAlias = Literal[_Sentinel.NEED_DATA]
+    _PAUSED: _PausedType = _Sentinel.PAUSED
+    _NEED_DATA: _NeedDataType = _Sentinel.NEED_DATA
+
+    class _NextEventType(Protocol):
+        def __call__(self) -> Union[h11.Event, _PausedType, _NeedDataType]:
+            ...
+
+else:
+    _PausedType = _PAUSED = h11.PAUSED
+    _NeedDataType = _NEED_DATA = h11.NEED_DATA
+    _Sentinel = _NextEventType = object
 
 
 class HTTPConnectionState(enum.IntEnum):
@@ -165,21 +187,21 @@ class HTTP11Connection(ConnectionInterface):
             event = self._receive_event(timeout=timeout)
             if isinstance(event, h11.Data):
                 yield bytes(event.data)
-            elif isinstance(event, (h11.EndOfMessage, h11.PAUSED)):
+            elif event is _PAUSED:
+                break
+            elif isinstance(event, h11.EndOfMessage):
                 break
 
     def _receive_event(
         self, timeout: Optional[float] = None
-    ) -> Union[h11.Event, h11.PAUSED]:
+    ) -> Union[h11.Event, _PausedType]:
+        # The h11 type signature uses a private return type
+        next_event = cast(_NextEventType, self._h11_state.next_event)
         while True:
             with map_exceptions({h11.RemoteProtocolError: RemoteProtocolError}):
-                # The h11 type signature uses a private return type
-                event = cast(
-                    Union[h11.Event, h11.NEED_DATA, h11.PAUSED],
-                    self._h11_state.next_event(),
-                )
+                event = next_event()
 
-            if isinstance(event, h11.NEED_DATA):
+            if event is _NEED_DATA:
                 data = self._network_stream.read(
                     self.READ_NUM_BYTES, timeout=timeout
                 )
